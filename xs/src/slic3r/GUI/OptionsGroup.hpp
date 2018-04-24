@@ -27,6 +27,9 @@ namespace Slic3r { namespace GUI {
 using widget_t = std::function<wxSizer*(wxWindow*)>;//!std::function<wxWindow*(wxWindow*)>;
 using column_t = std::function<wxSizer*(const Line&)>;
 
+//auto default_label_clr = wxSystemSettings::GetColour(wxSYS_COLOUR_3DLIGHT); //GetSystemColour
+//auto modified_label_clr = *new wxColour(254, 189, 101);
+
 /// Wraps a ConfigOptionDef and adds function object for creating a side_widget.
 struct Option {
 	ConfigOptionDef			opt { ConfigOptionDef() };
@@ -35,8 +38,7 @@ struct Option {
     bool					readonly {false};
 
 	Option(const ConfigOptionDef& _opt, t_config_option_key id) :
-		opt(_opt), opt_id(id) { translate(); }
-	void		translate();
+		opt(_opt), opt_id(id) {}
 };
 using t_option = std::unique_ptr<Option>;	//!
 
@@ -67,6 +69,7 @@ private:
 };
 
 using t_optionfield_map = std::map<t_config_option_key, t_field>;
+using t_opt_map = std::map< std::string, std::pair<std::string, int> >;
 
 class OptionsGroup {
 public:
@@ -76,29 +79,47 @@ public:
     wxSizer*		sizer {nullptr};
     column_t		extra_column {nullptr};
     t_change		m_on_change {nullptr};
+	std::function<DynamicPrintConfig()>	m_get_initial_config{ nullptr };
+	std::function<DynamicPrintConfig()>	m_get_sys_config{ nullptr };
+	std::function<bool()>	have_sys_config{ nullptr };
 
     wxFont			sidetext_font {wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT) };
     wxFont			label_font {wxSystemSettings::GetFont(wxSYS_DEFAULT_GUI_FONT) };
+
+	std::function<std::string()>	nonsys_btn_icon{ nullptr };
 
     /// Returns a copy of the pointer of the parent wxWindow.
     /// Accessor function is because users are not allowed to change the parent
     /// but defining it as const means a lot of const_casts to deal with wx functions.
     inline wxWindow* parent() const { return m_parent; }
 
-    void		append_line(const Line& line);
+	void		append_line(const Line& line, wxStaticText** colored_Label = nullptr);
     Line		create_single_option_line(const Option& option) const;
     void		append_single_option_line(const Option& option) { append_line(create_single_option_line(option)); }
 
     // return a non-owning pointer reference 
-    inline /*const*/ Field*	get_field(t_config_option_key id) const { try { return m_fields.at(id).get(); } catch (std::out_of_range e) { return nullptr; } }
-	bool			set_value(t_config_option_key id, boost::any value) { try { m_fields.at(id)->set_value(value); return true; } catch (std::out_of_range e) { return false; } }
-	boost::any		get_value(t_config_option_key id) { boost::any out; try { out = m_fields.at(id)->get_value(); } catch (std::out_of_range e) { ; } return out; }
+    inline Field*	get_field(const t_config_option_key& id) const{
+							if (m_fields.find(id) == m_fields.end()) return nullptr;
+							return m_fields.at(id).get();
+    }
+	bool			set_value(const t_config_option_key& id, const boost::any& value, bool change_event = false) {
+							if (m_fields.find(id) == m_fields.end()) return false;
+							m_fields.at(id)->set_value(value, change_event);
+							return true;
+    }
+	boost::any		get_value(const t_config_option_key& id) {
+							boost::any out; 
+    						if (m_fields.find(id) == m_fields.end()) ;
+							else 
+								out = m_fields.at(id)->get_value();
+							return out;
+    }
 
 	inline void		enable() { for (auto& field : m_fields) field.second->enable(); }
     inline void		disable() { for (auto& field : m_fields) field.second->disable(); }
 
-    OptionsGroup(wxWindow* _parent, wxString title) : 
-		m_parent(_parent), title(title) {
+    OptionsGroup(wxWindow* _parent, const wxString& title, bool is_tab_opt=false) : 
+		m_parent(_parent), title(title), m_is_tab_opt(is_tab_opt), staticbox(title!="") {
         sizer = (staticbox ? new wxStaticBoxSizer(new wxStaticBox(_parent, wxID_ANY, title), wxVERTICAL) : new wxBoxSizer(wxVERTICAL));
         auto num_columns = 1U;
         if (label_width != 0) num_columns++;
@@ -120,30 +141,34 @@ protected:
     t_optionfield_map		m_fields;
     bool					m_disabled {false};
     wxGridSizer*			m_grid_sizer {nullptr};
+	// "true" if option is created in preset tabs
+	bool					m_is_tab_opt{ false };
 
     /// Generate a wxSizer or wxWindow from a configuration option
     /// Precondition: opt resolves to a known ConfigOption
     /// Postcondition: fields contains a wx gui object.
-    const t_field&		build_field(const t_config_option_key& id, const ConfigOptionDef& opt);
-    const t_field&		build_field(const t_config_option_key& id);
-    const t_field&		build_field(const Option& opt);
+	const t_field&		build_field(const t_config_option_key& id, const ConfigOptionDef& opt, wxStaticText* label = nullptr);
+	const t_field&		build_field(const t_config_option_key& id, wxStaticText* label = nullptr);
+	const t_field&		build_field(const Option& opt, wxStaticText* label = nullptr);
 
     virtual void		on_kill_focus (){};
-	virtual void		on_change_OG(t_config_option_key opt_id, boost::any value);
+	virtual void		on_change_OG(const t_config_option_key& opt_id, const boost::any& value);
+	virtual void		back_to_initial_value(const std::string& opt_key){}
+	virtual void		back_to_sys_value(const std::string& opt_key){}
 };
 
 class ConfigOptionsGroup: public OptionsGroup {
 public:
-	ConfigOptionsGroup(wxWindow* parent, wxString title, DynamicPrintConfig* _config = nullptr) : 
-		OptionsGroup(parent, title), m_config(_config) {}
+	ConfigOptionsGroup(wxWindow* parent, const wxString& title, DynamicPrintConfig* _config = nullptr, bool is_tab_opt = false) :
+		OptionsGroup(parent, title, is_tab_opt), m_config(_config) {}
 
     /// reference to libslic3r config, non-owning pointer (?).
     DynamicPrintConfig*		m_config {nullptr};
     bool					m_full_labels {0};
-	std::map< std::string, std::pair<std::string, int> > m_opt_map;
+	t_opt_map				m_opt_map;
 
-	Option		get_option(const std::string opt_key, int opt_index = -1);
-	Line		create_single_option_line(const std::string title, int idx = -1) /*const*/{
+	Option		get_option(const std::string& opt_key, int opt_index = -1);
+	Line		create_single_option_line(const std::string& title, int idx = -1) /*const*/{
 		Option option = get_option(title, idx);
 		return OptionsGroup::create_single_option_line(option);
 	}
@@ -156,16 +181,16 @@ public:
 		append_single_option_line(option);		
 	}
 
-	void		on_change_OG(t_config_option_key opt_id, boost::any value) override;
-	void		on_kill_focus() override
-	{
-		reload_config();
-	}
+	void		on_change_OG(const t_config_option_key& opt_id, const boost::any& value) override;
+	void		back_to_initial_value(const std::string& opt_key) override;
+	void		back_to_sys_value(const std::string& opt_key) override;
+	void		back_to_config_value(const DynamicPrintConfig& config, const std::string& opt_key);
+	void		on_kill_focus() override{ reload_config();}
 	void		reload_config();
-	boost::any	config_value(std::string opt_key, int opt_index, bool deserialize);
+	boost::any	config_value(const std::string& opt_key, int opt_index, bool deserialize);
 	// return option value from config 
-	boost::any	get_config_value(DynamicPrintConfig& config, std::string opt_key, int opt_index = -1);
-	Field*		get_fieldc(t_config_option_key opt_key, int opt_index);
+	boost::any	get_config_value(const DynamicPrintConfig& config, const std::string& opt_key, int opt_index = -1);
+	Field*		get_fieldc(const t_config_option_key& opt_key, int opt_index);
 };
 
 //  Static text shown among the options.
@@ -175,7 +200,7 @@ public:
 	ogStaticText(wxWindow* parent, const char *text) : wxStaticText(parent, wxID_ANY, text, wxDefaultPosition, wxDefaultSize){}
 	~ogStaticText(){}
 
-	void SetText(wxString value);
+	void		SetText(const wxString& value);
 };
 
 }}

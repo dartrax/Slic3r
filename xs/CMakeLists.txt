@@ -54,6 +54,7 @@ add_library(libslic3r STATIC
     ${LIBDIR}/libslic3r/ExtrusionEntityCollection.hpp
     ${LIBDIR}/libslic3r/ExtrusionSimulator.cpp
     ${LIBDIR}/libslic3r/ExtrusionSimulator.hpp
+    ${LIBDIR}/libslic3r/FileParserError.hpp
     ${LIBDIR}/libslic3r/Fill/Fill.cpp
     ${LIBDIR}/libslic3r/Fill/Fill.hpp
     ${LIBDIR}/libslic3r/Fill/Fill3DHoneycomb.cpp
@@ -64,6 +65,8 @@ add_library(libslic3r STATIC
     ${LIBDIR}/libslic3r/Fill/FillConcentric.hpp
     ${LIBDIR}/libslic3r/Fill/FillHoneycomb.cpp
     ${LIBDIR}/libslic3r/Fill/FillHoneycomb.hpp
+    ${LIBDIR}/libslic3r/Fill/FillGyroid.cpp
+    ${LIBDIR}/libslic3r/Fill/FillGyroid.hpp
     ${LIBDIR}/libslic3r/Fill/FillPlanePath.cpp
     ${LIBDIR}/libslic3r/Fill/FillPlanePath.hpp
     ${LIBDIR}/libslic3r/Fill/FillRectilinear.cpp
@@ -169,10 +172,14 @@ add_library(libslic3r STATIC
 add_library(libslic3r_gui STATIC
     ${LIBDIR}/slic3r/GUI/AppConfig.cpp
     ${LIBDIR}/slic3r/GUI/AppConfig.hpp
+    ${LIBDIR}/slic3r/GUI/BitmapCache.cpp
+    ${LIBDIR}/slic3r/GUI/BitmapCache.hpp
     ${LIBDIR}/slic3r/GUI/3DScene.cpp
     ${LIBDIR}/slic3r/GUI/3DScene.hpp
     ${LIBDIR}/slic3r/GUI/GLShader.cpp
     ${LIBDIR}/slic3r/GUI/GLShader.hpp
+    ${LIBDIR}/slic3r/GUI/Preferences.cpp
+    ${LIBDIR}/slic3r/GUI/Preferences.hpp
     ${LIBDIR}/slic3r/GUI/Preset.cpp
     ${LIBDIR}/slic3r/GUI/Preset.hpp
     ${LIBDIR}/slic3r/GUI/PresetBundle.cpp
@@ -195,6 +202,24 @@ add_library(libslic3r_gui STATIC
     ${LIBDIR}/slic3r/GUI/2DBed.hpp
     ${LIBDIR}/slic3r/GUI/wxExtensions.cpp
     ${LIBDIR}/slic3r/GUI/wxExtensions.hpp
+    ${LIBDIR}/slic3r/GUI/WipeTowerDialog.cpp
+    ${LIBDIR}/slic3r/GUI/WipeTowerDialog.hpp
+    ${LIBDIR}/slic3r/GUI/RammingChart.cpp
+    ${LIBDIR}/slic3r/GUI/RammingChart.hpp
+    ${LIBDIR}/slic3r/GUI/BonjourDialog.cpp
+    ${LIBDIR}/slic3r/GUI/BonjourDialog.hpp
+    ${LIBDIR}/slic3r/Config/Snapshot.cpp
+    ${LIBDIR}/slic3r/Config/Snapshot.hpp
+    ${LIBDIR}/slic3r/Config/Version.cpp
+    ${LIBDIR}/slic3r/Config/Version.hpp    
+    ${LIBDIR}/slic3r/Utils/ASCIIFolding.cpp
+    ${LIBDIR}/slic3r/Utils/ASCIIFolding.hpp
+    ${LIBDIR}/slic3r/Utils/Http.cpp
+    ${LIBDIR}/slic3r/Utils/Http.hpp
+    ${LIBDIR}/slic3r/Utils/OctoPrint.cpp
+    ${LIBDIR}/slic3r/Utils/OctoPrint.hpp
+    ${LIBDIR}/slic3r/Utils/Bonjour.cpp
+    ${LIBDIR}/slic3r/Utils/Bonjour.hpp
 )
 
 add_library(admesh STATIC
@@ -285,6 +310,11 @@ add_library(Shiny STATIC
     ${LIBDIR}/Shiny/ShinyZone.h
 )
 
+add_library(semver STATIC
+    ${LIBDIR}/semver/semver.h
+    ${LIBDIR}/semver/semver.c
+)
+
 # Generate the Slic3r Perl module (XS) typemap file.
 set(MyTypemap ${CMAKE_CURRENT_BINARY_DIR}/typemap)
 add_custom_command(
@@ -334,6 +364,7 @@ set(XS_XSP_FILES
     ${XSP_DIR}/Surface.xsp
     ${XSP_DIR}/SurfaceCollection.xsp
     ${XSP_DIR}/TriangleMesh.xsp
+    ${XSP_DIR}/Utils_OctoPrint.xsp
     ${XSP_DIR}/XS.xsp
 )
 foreach (file ${XS_XSP_FILES})
@@ -471,6 +502,7 @@ if(SLIC3R_STATIC)
     # Use boost libraries linked statically to the C++ runtime.
     # set(Boost_USE_STATIC_RUNTIME ON)
 endif()
+#set(Boost_DEBUG ON)
 find_package(Boost REQUIRED COMPONENTS system filesystem thread log locale regex)
 if(Boost_FOUND)
     include_directories(${Boost_INCLUDE_DIRS})
@@ -516,6 +548,27 @@ if (SLIC3R_PRUSACONTROL)
     endif ()
     add_definitions(-DSLIC3R_GUI -DSLIC3R_PRUS)
     target_link_libraries(XS ${wxWidgets_LIBRARIES})
+endif()
+
+find_package(CURL REQUIRED)
+include_directories(${CURL_INCLUDE_DIRS})
+target_link_libraries(XS ${CURL_LIBRARIES})
+
+if (SLIC3R_STATIC)
+    if (NOT APPLE)
+        # libcurl is always linked dynamically to the system libcurl on OSX.
+        # On other systems, libcurl is linked statically if SLIC3R_STATIC is set.
+        add_definitions(-DCURL_STATICLIB)
+    endif()
+    if (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # As of now, our build system produces a statically linked libcurl,
+        # which links the OpenSSL library dynamically.
+        find_package(OpenSSL REQUIRED)
+        message("OpenSSL include dir: ${OPENSSL_INCLUDE_DIR}")
+        message("OpenSSL libraries: ${OPENSSL_LIBRARIES}")
+        include_directories(${OPENSSL_INCLUDE_DIR})
+        target_link_libraries(XS ${OPENSSL_LIBRARIES})
+    endif()
 endif()
 
 ## OPTIONAL packages
@@ -592,6 +645,21 @@ elseif (NOT MSVC)
     target_link_libraries(slic3r -lstdc++)
 endif ()
 
+if (MSVC)
+    # Here we associate some additional properties with the MSVC project to enable compilation and debugging out of the box.
+    set_target_properties(XS PROPERTIES VS_USER_PROPS "${PROJECT_SOURCE_DIR}/cmake/msvc/xs.wperl64d.props")
+endif()
+
+# l10n
+set(L10N_DIR "${PROJECT_SOURCE_DIR}/resources/localization")
+add_custom_target(pot
+    COMMAND xgettext --keyword=L --from-code=UTF-8 --debug
+        -f "${L10N_DIR}/list.txt"
+        -o "${L10N_DIR}/Slic3rPE.pot"
+    WORKING_DIRECTORY ${PROJECT_SOURCE_DIR}
+    COMMENT "Generate pot file from strings in the source tree"
+)
+
 # Installation
-install(TARGETS XS DESTINATION lib/slic3r-prusa3d/auto/Slic3r/XS)
-install(FILES lib/Slic3r/XS.pm DESTINATION lib/slic3r-prusa3d/Slic3r)
+install(TARGETS XS DESTINATION ${PERL_VENDORARCH}/auto/Slic3r/XS)
+install(FILES lib/Slic3r/XS.pm DESTINATION ${PERL_VENDORLIB}/Slic3r)

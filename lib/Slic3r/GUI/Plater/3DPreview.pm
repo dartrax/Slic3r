@@ -8,7 +8,9 @@ use Wx qw(:misc :sizer :slider :statictext :keycode wxWHITE wxCB_READONLY);
 use Wx::Event qw(EVT_SLIDER EVT_KEY_DOWN EVT_CHECKBOX EVT_CHOICE EVT_CHECKLISTBOX);
 use base qw(Wx::Panel Class::Accessor);
 
-__PACKAGE__->mk_accessors(qw(print gcode_preview_data enabled _loaded canvas slider_low slider_high single_layer auto_zoom));
+use Wx::Locale gettext => 'L';
+
+__PACKAGE__->mk_accessors(qw(print gcode_preview_data enabled _loaded canvas slider_low slider_high single_layer));
 
 sub new {
     my $class = shift;
@@ -19,7 +21,6 @@ sub new {
     $self->{number_extruders} = 1;
     # Show by feature type by default.
     $self->{preferred_color_mode} = 'feature';
-    $self->auto_zoom(1);
 
     # init GUI elements
     my $canvas = Slic3r::GUI::3DScene->new($self);
@@ -58,34 +59,46 @@ sub new {
     $z_label_high->SetFont($Slic3r::GUI::small_font);
 
     $self->single_layer(0);
-    my $checkbox_singlelayer = $self->{checkbox_singlelayer} = Wx::CheckBox->new($self, -1, "1 Layer");
+    my $checkbox_singlelayer = $self->{checkbox_singlelayer} = Wx::CheckBox->new($self, -1, L("1 Layer"));
     
-    my $label_view_type = $self->{label_view_type} = Wx::StaticText->new($self, -1, "View");
+    my $label_view_type = $self->{label_view_type} = Wx::StaticText->new($self, -1, L("View"));
     
     my $choice_view_type = $self->{choice_view_type} = Wx::Choice->new($self, -1);
-    $choice_view_type->Append("Feature type");
-    $choice_view_type->Append("Height");
-    $choice_view_type->Append("Width");
-    $choice_view_type->Append("Speed");
-    $choice_view_type->Append("Tool");
+    $choice_view_type->Append(L("Feature type"));
+    $choice_view_type->Append(L("Height"));
+    $choice_view_type->Append(L("Width"));
+    $choice_view_type->Append(L("Speed"));
+    $choice_view_type->Append(L("Volumetric flow rate"));
+    $choice_view_type->Append(L("Tool"));
     $choice_view_type->SetSelection(0);
 
-    my $label_show_features = $self->{label_show_features} = Wx::StaticText->new($self, -1, "Show");
+    # the following value needs to be changed if new items are added into $choice_view_type before "Tool"
+    $self->{tool_idx} = 5;
+    
+    my $label_show_features = $self->{label_show_features} = Wx::StaticText->new($self, -1, L("Show"));
     
     my $combochecklist_features = $self->{combochecklist_features} = Wx::ComboCtrl->new();
-    $combochecklist_features->Create($self, -1, "Feature types", wxDefaultPosition, [200, -1], wxCB_READONLY);
-    #FIXME If the following line is removed, the combo box popup list will not react to mouse clicks.
-    # On the other side, with this line the combo box popup cannot be closed by clicking on the combo button on Windows 10.
-    $combochecklist_features->UseAltPopupWindow();
-    $combochecklist_features->EnablePopupAnimation(0);
-    my $feature_text = "Feature types";
-    my $feature_items = "Perimeter|External perimeter|Overhang perimeter|Internal infill|Solid infill|Top solid infill|Bridge infill|Gap fill|Skirt|Support material|Support material interface|Wipe tower";
+    $combochecklist_features->Create($self, -1, L("Feature types"), wxDefaultPosition, [200, -1], wxCB_READONLY);
+    my $feature_text = L("Feature types");
+    my $feature_items = L("Perimeter")."|"
+                        .L("External perimeter")."|"
+                        .L("Overhang perimeter")."|"
+                        .L("Internal infill")."|"
+                        .L("Solid infill")."|"
+                        .L("Top solid infill")."|"
+                        .L("Bridge infill")."|"
+                        .L("Gap fill")."|"
+                        .L("Skirt")."|"
+                        .L("Support material")."|"
+                        .L("Support material interface")."|"
+                        .L("Wipe tower")."|"
+                        .L("Custom");
     Slic3r::GUI::create_combochecklist($combochecklist_features, $feature_text, $feature_items, 1);
     
-    my $checkbox_travel         = $self->{checkbox_travel}          = Wx::CheckBox->new($self, -1, "Travel");
-    my $checkbox_retractions    = $self->{checkbox_retractions}     = Wx::CheckBox->new($self, -1, "Retractions");    
-    my $checkbox_unretractions  = $self->{checkbox_unretractions}   = Wx::CheckBox->new($self, -1, "Unretractions");
-    my $checkbox_shells         = $self->{checkbox_shells}          = Wx::CheckBox->new($self, -1, "Shells");
+    my $checkbox_travel         = $self->{checkbox_travel}          = Wx::CheckBox->new($self, -1, L("Travel"));
+    my $checkbox_retractions    = $self->{checkbox_retractions}     = Wx::CheckBox->new($self, -1, L("Retractions"));    
+    my $checkbox_unretractions  = $self->{checkbox_unretractions}   = Wx::CheckBox->new($self, -1, L("Unretractions"));
+    my $checkbox_shells         = $self->{checkbox_shells}          = Wx::CheckBox->new($self, -1, L("Shells"));
 
     my $hsizer = Wx::BoxSizer->new(wxHORIZONTAL);
     my $vsizer = Wx::BoxSizer->new(wxVERTICAL);
@@ -194,43 +207,31 @@ sub new {
     });
     EVT_CHOICE($self, $choice_view_type, sub {
         my $selection = $choice_view_type->GetCurrentSelection();
-        $self->{preferred_color_mode} = ($selection == 4) ? 'tool' : 'feature';
+        $self->{preferred_color_mode} = ($selection == $self->{tool_idx}) ? 'tool' : 'feature';
         $self->gcode_preview_data->set_type($selection);
-        $self->auto_zoom(0);
         $self->reload_print;
-        $self->auto_zoom(1);
     });
     EVT_CHECKLISTBOX($self, $combochecklist_features, sub {
         my $flags = Slic3r::GUI::combochecklist_get_flags($combochecklist_features);
         
         $self->gcode_preview_data->set_extrusion_flags($flags);
-        $self->auto_zoom(0);
         $self->refresh_print;
-        $self->auto_zoom(1);
     });    
     EVT_CHECKBOX($self, $checkbox_travel, sub {
         $self->gcode_preview_data->set_travel_visible($checkbox_travel->IsChecked());
-        $self->auto_zoom(0);
         $self->refresh_print;
-        $self->auto_zoom(1);
     });    
     EVT_CHECKBOX($self, $checkbox_retractions, sub {
         $self->gcode_preview_data->set_retractions_visible($checkbox_retractions->IsChecked());
-        $self->auto_zoom(0);
         $self->refresh_print;
-        $self->auto_zoom(1);
     });
     EVT_CHECKBOX($self, $checkbox_unretractions, sub {
         $self->gcode_preview_data->set_unretractions_visible($checkbox_unretractions->IsChecked());
-        $self->auto_zoom(0);
         $self->refresh_print;
-        $self->auto_zoom(1);
     });
     EVT_CHECKBOX($self, $checkbox_shells, sub {
         $self->gcode_preview_data->set_shells_visible($checkbox_shells->IsChecked());
-        $self->auto_zoom(0);
         $self->refresh_print;
-        $self->auto_zoom(1);
     });
     
     $self->SetSizer($main_sizer);
@@ -243,18 +244,19 @@ sub new {
     
     # sets colors for gcode preview extrusion roles
     my @extrusion_roles_colors = (
-                                    'Perimeter'                  => 'FFA500',
-                                    'External perimeter'         => 'FFFF66',
+                                    'Perimeter'                  => 'FFFF66',
+                                    'External perimeter'         => 'FFA500',
                                     'Overhang perimeter'         => '0000FF',
-                                    'Internal infill'            => 'FF0000',
-                                    'Solid infill'               => 'CD00CD',
-                                    'Top solid infill'           => 'FF3333',
+                                    'Internal infill'            => 'B1302A',
+                                    'Solid infill'               => 'D732D7',
+                                    'Top solid infill'           => 'FF1A1A',
                                     'Bridge infill'              => '9999FF',
                                     'Gap fill'                   => 'FFFFFF',
-                                    'Skirt'                      => '7F0000',
+                                    'Skirt'                      => '845321',
                                     'Support material'           => '00FF00',
                                     'Support material interface' => '008000',
                                     'Wipe tower'                 => 'B3E3AB',
+                                    'Custom'                     => '28CC94',
                                  );
     $self->gcode_preview_data->set_extrusion_paths_colors(\@extrusion_roles_colors);
     
@@ -290,6 +292,12 @@ sub refresh_print {
     $self->load_print;
 }
 
+sub reset_gcode_preview_data {
+    my ($self) = @_;
+    $self->gcode_preview_data->reset;
+    $self->canvas->reset_legend_texture();
+}
+
 sub load_print {
     my ($self) = @_;
     
@@ -322,36 +330,14 @@ sub load_print {
         return;
     }
     
-    my $z_idx_low = $self->slider_low->GetValue;
-    my $z_idx_high = $self->slider_high->GetValue;
-    $self->enabled(1);
-    $self->slider_low->SetRange(0, $n_layers - 1);
-    $self->slider_high->SetRange(0, $n_layers - 1);
-    if ($z_idx_high < $n_layers && ($self->single_layer || $z_idx_high != 0)) {
-        # use $z_idx
-    } else {
-        # Out of range. Disable 'single layer' view.
-        $self->single_layer(0);
-        $self->{checkbox_singlelayer}->SetValue(0);
-        $z_idx_low = 0;
-        $z_idx_high = $n_layers - 1;
-    }
-    if ($self->single_layer) {
-        $z_idx_low = $z_idx_high;
-    } elsif ($z_idx_low > $z_idx_high) {
-        $z_idx_low = 0;
-    }
-    $self->slider_low->SetValue($z_idx_low);
-    $self->slider_high->SetValue($z_idx_high);
-    $self->slider_low->Show;
-    $self->slider_high->Show;
-    $self->Layout;
-
+    # used to set the sliders to the extremes of the current zs range
+    $self->{force_sliders_full_range} = 0;
+    
     if ($self->{preferred_color_mode} eq 'tool_or_feature') {
         # It is left to Slic3r to decide whether the print shall be colored by the tool or by the feature.
         # Color by feature if it is a single extruder print.
         my $extruders = $self->{print}->extruders;
-        my $type = (scalar(@{$extruders}) > 1) ? 4 : 0;
+        my $type = (scalar(@{$extruders}) > 1) ? $self->{tool_idx} : 0;
         $self->gcode_preview_data->set_type($type);
         $self->{choice_view_type}->SetSelection($type);
         # If the ->SetSelection changed the following line, revert it to "decide yourself".
@@ -360,7 +346,7 @@ sub load_print {
 
     # Collect colors per extruder.
     my @colors = ();
-    if (! $self->gcode_preview_data->empty() || $self->gcode_preview_data->type == 4) {
+    if (! $self->gcode_preview_data->empty() || $self->gcode_preview_data->type == $self->{tool_idx}) {
         my @extruder_colors = @{$self->{config}->extruder_colour};
         my @filament_colors = @{$self->{config}->filament_colour};
         for (my $i = 0; $i <= $#extruder_colors; $i += 1) {
@@ -384,16 +370,54 @@ sub load_print {
             }
             $self->show_hide_ui_elements('simple');
         } else {
+            $self->{force_sliders_full_range} = (scalar(@{$self->canvas->volumes}) == 0);
             $self->canvas->load_gcode_preview($self->print, $self->gcode_preview_data, \@colors);
             $self->show_hide_ui_elements('full');
+
+            # recalculates zs and update sliders accordingly
+            $self->{layers_z} = $self->canvas->get_current_print_zs();
+            $n_layers = scalar(@{$self->{layers_z}});            
         }
-        if ($self->auto_zoom) {
-            $self->canvas->zoom_to_volumes;
-        }
+
+        $self->update_sliders($n_layers);
         $self->_loaded(1);
     }
+}
+
+sub update_sliders
+{
+    my ($self, $n_layers) = @_;
+        
+    my $z_idx_low = $self->slider_low->GetValue;
+    my $z_idx_high = $self->slider_high->GetValue;
+    $self->enabled(1);
+    $self->slider_low->SetRange(0, $n_layers - 1);
+    $self->slider_high->SetRange(0, $n_layers - 1);
     
+    if ($self->{force_sliders_full_range}) {
+        $z_idx_low = 0;
+        $z_idx_high = $n_layers - 1;
+    } elsif ($z_idx_high < $n_layers && ($self->single_layer || $z_idx_high != 0)) {
+        # use $z_idx
+    } else {
+        # Out of range. Disable 'single layer' view.
+        $self->single_layer(0);
+        $self->{checkbox_singlelayer}->SetValue(0);
+        $z_idx_low = 0;
+        $z_idx_high = $n_layers - 1;
+    }
+    if ($self->single_layer) {
+        $z_idx_low = $z_idx_high;
+    } elsif ($z_idx_low > $z_idx_high) {
+        $z_idx_low = 0;
+    }
+    
+    $self->slider_low->SetValue($z_idx_low);
+    $self->slider_high->SetValue($z_idx_high);
+    $self->slider_low->Show;
+    $self->slider_high->Show;
     $self->set_z_range($self->{layers_z}[$z_idx_low], $self->{layers_z}[$z_idx_high]);
+    $self->Layout;    
 }
 
 sub set_z_range
@@ -443,11 +467,11 @@ sub set_number_extruders {
     if ($self->{number_extruders} != $number_extruders) {
         $self->{number_extruders} = $number_extruders;
         my $type = ($number_extruders > 1) ?
-              4  # color by a tool number
+              $self->{tool_idx}  # color by a tool number
             : 0; # color by a feature type
         $self->{choice_view_type}->SetSelection($type);
         $self->gcode_preview_data->set_type($type);
-        $self->{preferred_color_mode} = ($type == 4) ? 'tool_or_feature' : 'feature';
+        $self->{preferred_color_mode} = ($type == $self->{tool_idx}) ? 'tool_or_feature' : 'feature';
     }
 }
 

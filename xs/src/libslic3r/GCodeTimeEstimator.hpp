@@ -5,6 +5,8 @@
 #include "PrintConfig.hpp"
 #include "GCodeReader.hpp"
 
+#define ENABLE_MOVE_STATS 0
+
 namespace Slic3r {
 
     //
@@ -59,8 +61,8 @@ namespace Slic3r {
         {
             GCodeFlavor dialect;
             EUnits units;
-            EPositioningType positioning_xyz_type;
-            EPositioningType positioning_e_type;
+            EPositioningType global_positioning_type;
+            EPositioningType e_local_positioning_type;
             Axis axis[Num_Axis];
             float feedrate;                     // mm/s
             float acceleration;                 // mm/s^2
@@ -74,6 +76,19 @@ namespace Slic3r {
     public:
         struct Block
         {
+#if ENABLE_MOVE_STATS
+            enum EMoveType : unsigned char
+            {
+                Noop,
+                Retract,
+                Unretract,
+                Tool_change,
+                Move,
+                Extrude,
+                Num_Types
+            };
+#endif // ENABLE_MOVE_STATS
+
             struct FeedrateProfile
             {
                 float entry;  // mm/s
@@ -106,6 +121,10 @@ namespace Slic3r {
                 bool nominal_length;
             };
 
+
+#if ENABLE_MOVE_STATS
+            EMoveType move_type;
+#endif // ENABLE_MOVE_STATS
             Flags flags;
 
             float delta_pos[Num_Axis]; // mm
@@ -156,6 +175,18 @@ namespace Slic3r {
 
         typedef std::vector<Block> BlocksList;
 
+#if ENABLE_MOVE_STATS
+        struct MoveStats
+        {
+            unsigned int count;
+            float time;
+
+            MoveStats();
+        };
+
+        typedef std::map<Block::EMoveType, MoveStats> MovesStatsMap;
+#endif // ENABLE_MOVE_STATS
+
     private:
         GCodeReader _parser;
         State _state;
@@ -163,6 +194,9 @@ namespace Slic3r {
         Feedrates _prev;
         BlocksList _blocks;
         float _time; // s
+#if ENABLE_MOVE_STATS
+        MovesStatsMap _moves_stats;
+#endif // ENABLE_MOVE_STATS
 
     public:
         GCodeTimeEstimator();
@@ -223,11 +257,11 @@ namespace Slic3r {
         void set_units(EUnits units);
         EUnits get_units() const;
 
-        void set_positioning_xyz_type(EPositioningType type);
-        EPositioningType get_positioning_xyz_type() const;
+        void set_global_positioning_type(EPositioningType type);
+        EPositioningType get_global_positioning_type() const;
 
-        void set_positioning_e_type(EPositioningType type);
-        EPositioningType get_positioning_e_type() const;
+        void set_e_local_positioning_type(EPositioningType type);
+        EPositioningType get_e_local_positioning_type() const;
 
         void add_additional_time(float timeSec);
         void set_additional_time(float timeSec);
@@ -318,6 +352,10 @@ namespace Slic3r {
         void _planner_reverse_pass_kernel(Block& curr, Block& next);
 
         void _recalculate_trapezoids();
+
+#if ENABLE_MOVE_STATS
+        void _log_moves_stats() const;
+#endif // ENABLE_MOVE_STATS
     };
 
 } /* namespace Slic3r */

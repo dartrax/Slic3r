@@ -21,6 +21,7 @@
 #include <wx/treectrl.h>
 #include <wx/imaglist.h>
 #include <wx/statbox.h>
+#include <wx/dataview.h>
 
 #include <map>
 #include <vector>
@@ -54,6 +55,9 @@ public:
 	}
 	~Page(){}
 
+	bool				m_is_modified_values{ false };
+	bool				m_is_nonsys_values{ true };
+
 public:
 	std::vector <ConfigOptionsGroupShp> m_optgroups;
 	DynamicPrintConfig* m_config;
@@ -64,9 +68,9 @@ public:
 	size_t		iconID() const { return m_iconID; }
 	void		set_config(DynamicPrintConfig* config_in) { m_config = config_in; }
 	void		reload_config();
-	Field*		get_field(t_config_option_key opt_key, int opt_index = -1) const;
-	bool		set_value(t_config_option_key opt_key, boost::any value);
-	ConfigOptionsGroupShp	new_optgroup(wxString title, int noncommon_label_width = -1);
+	Field*		get_field(const t_config_option_key& opt_key, int opt_index = -1) const;
+	bool		set_value(const t_config_option_key& opt_key, const boost::any& value);
+	ConfigOptionsGroupShp	new_optgroup(const wxString& title, int noncommon_label_width = -1);
 };
 
 // Slic3r::GUI::Tab;
@@ -90,29 +94,43 @@ protected:
 	wxImageList*		m_icons;
 	wxCheckBox*			m_compatible_printers_checkbox;
 	wxButton*			m_compatible_printers_btn;
+	wxButton*			m_undo_btn;
+	wxButton*			m_undo_to_sys_btn;
+	wxComboCtrl*		m_cc_presets_choice;
+	wxDataViewTreeCtrl*	m_presetctrl;
+	wxImageList*		m_preset_icons;
 
 	int					m_icon_count;
-	std::map<std::string, size_t>	m_icon_index;		// Map from an icon file name to its index in $self->{icons}.
-	std::vector<PageShp>			m_pages;	// $self->{pages} = [];
+	std::map<std::string, size_t>	m_icon_index;		// Map from an icon file name to its index
+	std::vector<PageShp>			m_pages;
 	bool				m_disable_tree_sel_changed_event;
 	bool				m_show_incompatible_presets;
 	bool				m_no_controller;
 
 	std::vector<std::string>	m_reload_dependent_tabs = {};
+	std::vector<std::string>	m_dirty_options = {};
+	std::vector<std::string>	m_sys_options = {};
+	std::vector<std::string>	m_full_options_list = {};
 
 	// The two following two event IDs are generated at Plater.pm by calling Wx::NewEventType.
 	wxEventType			m_event_value_change = 0;
 	wxEventType 		m_event_presets_changed = 0;
 
+	bool				m_is_modified_values{ false };
+	bool				m_is_nonsys_values{ true };
+
 public:
 	PresetBundle*		m_preset_bundle;
-	bool				m_show_btn_incompatible_presets;
+	bool				m_show_btn_incompatible_presets = false;
 	PresetCollection*	m_presets;
 	DynamicPrintConfig*	m_config;
+	std::string			m_nonsys_btn_icon;
+	ogStaticText*		m_parent_preset_description_line;
+	wxStaticText*		m_colored_Label = nullptr;
 
 public:
 	Tab() {}
-	Tab(wxNotebook* parent, wxString title, const char* name, bool no_controller) : 
+	Tab(wxNotebook* parent, const wxString& title, const char* name, bool no_controller) : 
 		m_parent(parent), m_title(title), m_name(name), m_no_controller(no_controller) {
 		Create(parent, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxBK_LEFT | wxTAB_TRAVERSAL);
 		get_tabs_list().push_back(this);
@@ -130,11 +148,12 @@ public:
 	void		create_preset_tab(PresetBundle *preset_bundle);
 	void		load_current_preset();
 	void		rebuild_page_tree();
-	void		select_preset(std::string preset_name = "");
-	bool		may_discard_current_dirty_preset(PresetCollection* presets = nullptr, std::string new_printer_name = "");
+	void		select_preset(const std::string& preset_name = "");
+	bool		may_discard_current_dirty_preset(PresetCollection* presets = nullptr, const std::string& new_printer_name = "");
 	wxSizer*	compatible_printers_widget(wxWindow* parent, wxCheckBox** checkbox, wxButton** btn);
 
-	void		load_key_value(std::string opt_key, boost::any value);
+	void		update_presetsctrl(wxDataViewTreeCtrl* ui, bool show_incompatible);
+	void		load_key_value(const std::string& opt_key, const boost::any& value);
 	void		reload_compatible_printers_widget();
 
 	void		OnTreeSelChange(wxTreeEvent& event);
@@ -145,19 +164,29 @@ public:
 	void		toggle_show_hide_incompatible();
 	void		update_show_hide_incompatible_button();
 	void		update_ui_from_settings();
-	
-	PageShp		add_options_page(wxString title, std::string icon, bool is_extruder_pages = false);
+	void		update_changed_ui();
+	void		update_full_options_list();
+	void		update_sys_ui_after_sel_preset();
+	void		get_sys_and_mod_flags(const std::string& opt_key, bool& sys_page, bool& modified_page);
+	void		update_changed_tree_ui();
+	void		update_undo_buttons();
+
+	void		on_back_to_initial_value();
+	void		on_back_to_sys_value();
+
+	PageShp		add_options_page(const wxString& title, const std::string& icon, bool is_extruder_pages = false);
 
 	virtual void	OnActivate(){}
 	virtual void	on_preset_loaded(){}
 	virtual void	build() = 0;
 	virtual void	update() = 0;
+	void			load_initial_data();
 	void			update_dirty();
 	void			update_tab_ui();
-	void			load_config(DynamicPrintConfig config);
+	void			load_config(const DynamicPrintConfig& config);
 	virtual void	reload_config();
-	Field*			get_field(t_config_option_key opt_key, int opt_index = -1) const;
-	bool			set_value(t_config_option_key opt_key, boost::any value);
+	Field*			get_field(const t_config_option_key& opt_key, int opt_index = -1) const;
+	bool			set_value(const t_config_option_key& opt_key, const boost::any& value);
 	wxSizer*		description_line_widget(wxWindow* parent, ogStaticText** StaticText);
 	bool			current_preset_is_dirty();
 	DynamicPrintConfig*	get_config() { return m_config; }
@@ -167,10 +196,13 @@ public:
 	}
 	std::vector<std::string>	get_dependent_tabs() { return m_reload_dependent_tabs; }
 
-	void			on_value_change(std::string opt_key, boost::any value);
+	void			on_value_change(const std::string& opt_key, const boost::any& value);
 
 protected:
 	void			on_presets_changed();
+	void			update_frequently_changed_parameters();
+    void            update_wiping_button_visibility();
+	void			update_tab_presets(wxComboCtrl* ui, bool show_incompatible);
 };
 
 //Slic3r::GUI::Tab::Print;
@@ -179,7 +211,7 @@ class TabPrint : public Tab
 public:
 	TabPrint() {}
 	TabPrint(wxNotebook* parent, bool no_controller) : 
-		Tab(parent, _L("Print Settings"), "print", no_controller) {}
+		Tab(parent, _(L("Print Settings")), "print", no_controller) {}
 	~TabPrint(){}
 
 	ogStaticText*	m_recommended_thin_wall_thickness_description_line;
@@ -199,7 +231,7 @@ class TabFilament : public Tab
 public:
 	TabFilament() {}
 	TabFilament(wxNotebook* parent, bool no_controller) : 
-		Tab(parent, _L("Filament Settings"), "filament", no_controller) {}
+		Tab(parent, _(L("Filament Settings")), "filament", no_controller) {}
 	~TabFilament(){}
 
 	void		build() override;
@@ -211,23 +243,17 @@ public:
 //Slic3r::GUI::Tab::Printer;
 class TabPrinter : public Tab
 {
-	bool		m_is_disabled_button_browse;
-	bool		m_is_user_agent;
-	// similar event by clicking Buttons "Browse" & "Test"
-	wxEventType	m_event_button_browse = 0;
-	wxEventType m_event_button_test = 0;
 public:
 	wxButton*	m_serial_test_btn;
 	wxButton*	m_octoprint_host_test_btn;
 
 	size_t		m_extruders_count;
+	size_t		m_initial_extruders_count;
+	size_t		m_sys_extruders_count;
 	std::vector<PageShp>	m_extruder_pages;
 
 	TabPrinter() {}
-	TabPrinter(wxNotebook* parent, bool no_controller, bool is_disabled_btn_browse, bool is_user_agent) :
-		Tab(parent, _L("Printer Settings"), "printer", no_controller),
-		m_is_disabled_button_browse(is_disabled_btn_browse), 
-		m_is_user_agent(is_user_agent) {}
+	TabPrinter(wxNotebook* parent, bool no_controller) : Tab(parent, _(L("Printer Settings")), "printer", no_controller) {}
 	~TabPrinter(){}
 
 	void		build() override;
@@ -236,22 +262,18 @@ public:
 	void		extruders_count_changed(size_t extruders_count);
 	void		build_extruder_pages();
 	void		on_preset_loaded() override;
-
-	// Set the events to the callbacks posted to the main frame window (currently implemented in Perl).
-	void		set_event_button_browse(wxEventType evt)	{ m_event_button_browse = evt; }
-	void		set_event_button_test(wxEventType evt)		{ m_event_button_test = evt; }
 };
 
 class SavePresetWindow :public wxDialog
 {
 public:
-	SavePresetWindow(wxWindow* parent) :wxDialog(parent, wxID_ANY, _L("Save preset")){}
+	SavePresetWindow(wxWindow* parent) :wxDialog(parent, wxID_ANY, _(L("Save preset"))){}
 	~SavePresetWindow(){}
 
 	std::string		m_chosen_name;
 	wxComboBox*		m_combo;
 
-	void			build(wxString title, std::string default_name, std::vector<std::string> &values);
+	void			build(const wxString& title, const std::string& default_name, std::vector<std::string> &values);
 	void			accept();
 	std::string		get_name() { return m_chosen_name; }
 };

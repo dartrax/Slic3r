@@ -29,11 +29,11 @@ enum GCodeFlavor {
 
 enum InfillPattern {
     ipRectilinear, ipGrid, ipTriangles, ipStars, ipCubic, ipLine, ipConcentric, ipHoneycomb, ip3DHoneycomb,
-    ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
+    ipGyroid, ipHilbertCurve, ipArchimedeanChords, ipOctagramSpiral,
 };
 
 enum SupportMaterialPattern {
-    smpRectilinear, smpRectilinearGrid, smpHoneycomb, smpPillars,
+    smpRectilinear, smpRectilinearGrid, smpHoneycomb,
 };
 
 enum SeamPosition {
@@ -73,6 +73,7 @@ template<> inline t_config_enum_values& ConfigOptionEnum<InfillPattern>::get_enu
         keys_map["concentric"]          = ipConcentric;
         keys_map["honeycomb"]           = ipHoneycomb;
         keys_map["3dhoneycomb"]         = ip3DHoneycomb;
+        keys_map["gyroid"]              = ipGyroid;
         keys_map["hilbertcurve"]        = ipHilbertCurve;
         keys_map["archimedeanchords"]   = ipArchimedeanChords;
         keys_map["octagramspiral"]      = ipOctagramSpiral;
@@ -86,7 +87,6 @@ template<> inline t_config_enum_values& ConfigOptionEnum<SupportMaterialPattern>
         keys_map["rectilinear"]         = smpRectilinear;
         keys_map["rectilinear-grid"]    = smpRectilinearGrid;
         keys_map["honeycomb"]           = smpHoneycomb;
-        keys_map["pillars"]             = smpPillars;
     }
     return keys_map;
 }
@@ -154,6 +154,13 @@ public:
 
     // Validate the PrintConfig. Returns an empty string on success, otherwise an error message is returned.
     std::string         validate();
+
+    // Verify whether the opt_key has not been obsoleted or renamed.
+    // Both opt_key and value may be modified by handle_legacy().
+    // If the opt_key is no more valid in this version of Slic3r, opt_key is cleared by handle_legacy().
+    // handle_legacy() is called internally by set_deserialize().
+    void                handle_legacy(t_config_option_key &opt_key, std::string &value) const override
+        { PrintConfigDef::handle_legacy(opt_key, value); }
 };
 
 template<typename CONFIG>
@@ -466,6 +473,10 @@ public:
     ConfigOptionBools               filament_soluble;
     ConfigOptionFloats              filament_cost;
     ConfigOptionFloats              filament_max_volumetric_speed;
+    ConfigOptionFloats              filament_loading_speed;
+    ConfigOptionFloats              filament_unloading_speed;
+    ConfigOptionFloats              filament_toolchange_delay;
+    ConfigOptionStrings             filament_ramming_parameters;
     ConfigOptionBool                gcode_comments;
     ConfigOptionEnum<GCodeFlavor>   gcode_flavor;
     ConfigOptionString              layer_gcode;
@@ -491,7 +502,11 @@ public:
     ConfigOptionBool                use_relative_e_distances;
     ConfigOptionBool                use_volumetric_e;
     ConfigOptionBool                variable_layer_height;
-    
+    ConfigOptionFloat               cooling_tube_retraction;
+    ConfigOptionFloat               cooling_tube_length;
+    ConfigOptionFloat               parking_pos_retraction;
+
+
     std::string get_extrusion_axis() const
     {
         return
@@ -515,6 +530,10 @@ protected:
         OPT_PTR(filament_soluble);
         OPT_PTR(filament_cost);
         OPT_PTR(filament_max_volumetric_speed);
+        OPT_PTR(filament_loading_speed);
+        OPT_PTR(filament_unloading_speed);
+        OPT_PTR(filament_toolchange_delay);
+        OPT_PTR(filament_ramming_parameters);
         OPT_PTR(gcode_comments);
         OPT_PTR(gcode_flavor);
         OPT_PTR(layer_gcode);
@@ -540,6 +559,9 @@ protected:
         OPT_PTR(use_relative_e_distances);
         OPT_PTR(use_volumetric_e);
         OPT_PTR(variable_layer_height);
+        OPT_PTR(cooling_tube_retraction);
+        OPT_PTR(cooling_tube_length);
+        OPT_PTR(parking_pos_retraction);
     }
 };
 
@@ -582,6 +604,7 @@ public:
     ConfigOptionFloats              max_layer_height;
     ConfigOptionInts                min_fan_speed;
     ConfigOptionFloats              min_layer_height;
+    ConfigOptionFloat               max_print_height;
     ConfigOptionFloats              min_print_speed;
     ConfigOptionFloat               min_skirt_length;
     ConfigOptionString              notes;
@@ -609,6 +632,10 @@ public:
     ConfigOptionFloat               wipe_tower_y;
     ConfigOptionFloat               wipe_tower_width;
     ConfigOptionFloat               wipe_tower_per_color_wipe;
+    ConfigOptionFloat               wipe_tower_rotation_angle;
+    ConfigOptionFloat               wipe_tower_bridging;
+    ConfigOptionFloats              wiping_volumes_matrix;
+    ConfigOptionFloats              wiping_volumes_extruders;
     ConfigOptionFloat               z_offset;
     
 protected:
@@ -646,6 +673,7 @@ protected:
         OPT_PTR(max_layer_height);
         OPT_PTR(min_fan_speed);
         OPT_PTR(min_layer_height);
+        OPT_PTR(max_print_height);
         OPT_PTR(min_print_speed);
         OPT_PTR(min_skirt_length);
         OPT_PTR(notes);
@@ -673,6 +701,10 @@ protected:
         OPT_PTR(wipe_tower_y);
         OPT_PTR(wipe_tower_width);
         OPT_PTR(wipe_tower_per_color_wipe);
+        OPT_PTR(wipe_tower_rotation_angle);
+        OPT_PTR(wipe_tower_bridging);
+        OPT_PTR(wiping_volumes_matrix);
+        OPT_PTR(wiping_volumes_extruders);
         OPT_PTR(z_offset);
     }
 };
@@ -683,6 +715,7 @@ class HostConfig : public StaticPrintConfig
 public:
     ConfigOptionString              octoprint_host;
     ConfigOptionString              octoprint_apikey;
+    ConfigOptionString              octoprint_cafile;
     ConfigOptionString              serial_port;
     ConfigOptionInt                 serial_speed;
     
@@ -691,6 +724,7 @@ protected:
     {
         OPT_PTR(octoprint_host);
         OPT_PTR(octoprint_apikey);
+        OPT_PTR(octoprint_cafile);
         OPT_PTR(serial_port);
         OPT_PTR(serial_speed);
     }
@@ -709,6 +743,7 @@ class FullPrintConfig :
 public:
     // Validate the FullPrintConfig. Returns an empty string on success, otherwise an error message is returned.
     std::string                 validate();
+
 protected:
     // Protected constructor to be called to initialize ConfigCache::m_default.
     FullPrintConfig(int) : PrintObjectConfig(0), PrintRegionConfig(0), PrintConfig(0), HostConfig(0) {}

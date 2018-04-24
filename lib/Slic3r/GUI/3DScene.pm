@@ -68,6 +68,9 @@ __PACKAGE__->mk_accessors( qw(_quat _dirty init
                               _zoom
                               
                               _legend_enabled
+                              _warning_enabled
+                              _apply_zoom_to_volumes_filter
+                              _mouse_dragging
                                                             
                               ) );
                               
@@ -94,7 +97,7 @@ use constant MANIPULATION_IDLE          => 0;
 use constant MANIPULATION_DRAGGING      => 1;
 use constant MANIPULATION_LAYER_HEIGHT  => 2;
 
-use constant GIMBALL_LOCK_THETA_MAX => 170;
+use constant GIMBALL_LOCK_THETA_MAX => 180;
 
 use constant VARIABLE_LAYER_THICKNESS_BAR_WIDTH => 70;
 use constant VARIABLE_LAYER_THICKNESS_RESET_BUTTON_HEIGHT => 22;
@@ -141,7 +144,10 @@ sub new {
     $self->_sphi(45);
     $self->_zoom(1);
     $self->_legend_enabled(0);
+    $self->_warning_enabled(0);
     $self->use_plain_shader(0);
+    $self->_apply_zoom_to_volumes_filter(0);
+    $self->_mouse_dragging(0);
 
     # Collection of GLVolume objects
     $self->volumes(Slic3r::GUI::_3DScene::GLVolume::Collection->new);
@@ -195,6 +201,10 @@ sub new {
                 $self->select_view('left');
             } elsif ($key == ord('6')) {
                 $self->select_view('right');
+            } elsif ($key == ord('z')) {
+                $self->zoom_to_volumes;
+            } elsif ($key == ord('b')) {
+                $self->zoom_to_bed;
             } else {
                 $event->Skip;
             }
@@ -215,7 +225,12 @@ sub new {
 
 sub set_legend_enabled {
     my ($self, $value) = @_;
-   $self->_legend_enabled($value);
+    $self->_legend_enabled($value);
+}
+
+sub set_warning_enabled {
+    my ($self, $value) = @_;
+    $self->_warning_enabled($value);
 }
 
 sub Destroy {
@@ -372,6 +387,8 @@ sub mouse_event {
     my $pos = Slic3r::Pointf->new($e->GetPositionXY);
     my $object_idx_selected = $self->{layer_height_edit_last_object_id} = ($self->layer_editing_enabled && $self->{print}) ? $self->_first_selected_object_id_for_variable_layer_height_editing : -1;
 
+    $self->_mouse_dragging($e->Dragging);
+    
     if ($e->Entering && &Wx::wxMSW) {
         # wxMSW needs focus in order to catch mouse wheel events
         $self->SetFocus;
@@ -398,6 +415,10 @@ sub mouse_event {
             $self->Refresh;
             $self->Update;
         } else {
+            # The mouse_to_3d gets the Z coordinate from the Z buffer at the screen coordinate $pos->x,y,
+            # an converts the screen space coordinate to unscaled object space.
+            my $pos3d = ($volume_idx == -1) ? undef : $self->mouse_to_3d(@$pos);
+
             # Select volume in this 3D canvas.
             # Don't deselect a volume if layer editing is enabled. We want the object to stay selected
             # during the scene manipulation.
@@ -425,9 +446,6 @@ sub mouse_event {
             
             if ($volume_idx != -1) {
                 if ($e->LeftDown && $self->enable_moving) {
-                    # The mouse_to_3d gets the Z coordinate from the Z buffer at the screen coordinate $pos->x,y,
-                    # an converts the screen space coordinate to unscaled object space.
-                    my $pos3d = $self->mouse_to_3d(@$pos);
                     # Only accept the initial position, if it is inside the volume bounding box.
                     my $volume_bbox = $self->volumes->[$volume_idx]->transformed_bounding_box;
                     $volume_bbox->offset(1.);
@@ -585,22 +603,23 @@ sub mouse_wheel_event {
     $zoom = $zoom_min if defined $zoom_min && $zoom < $zoom_min;
     $self->_zoom($zoom);
     
-    # In order to zoom around the mouse point we need to translate
-    # the camera target
-    my $size = Slic3r::Pointf->new($self->GetSizeWH);
-    my $pos = Slic3r::Pointf->new($e->GetX, $size->y - $e->GetY); #-
-    $self->_camera_target->translate(
-        # ($pos - $size/2) represents the vector from the viewport center
-        # to the mouse point. By multiplying it by $zoom we get the new,
-        # transformed, length of such vector.
-        # Since we want that point to stay fixed, we move our camera target
-        # in the opposite direction by the delta of the length of such vector
-        # ($zoom - 1). We then scale everything by 1/$self->_zoom since 
-        # $self->_camera_target is expressed in terms of model units.
-        -($pos->x - $size->x/2) * ($zoom) / $self->_zoom,
-        -($pos->y - $size->y/2) * ($zoom) / $self->_zoom,
-        0,
-    ) if 0;
+#    # In order to zoom around the mouse point we need to translate
+#    # the camera target
+#    my $size = Slic3r::Pointf->new($self->GetSizeWH);
+#    my $pos = Slic3r::Pointf->new($e->GetX, $size->y - $e->GetY); #-
+#    $self->_camera_target->translate(
+#        # ($pos - $size/2) represents the vector from the viewport center
+#        # to the mouse point. By multiplying it by $zoom we get the new,
+#        # transformed, length of such vector.
+#        # Since we want that point to stay fixed, we move our camera target
+#        # in the opposite direction by the delta of the length of such vector
+#        # ($zoom - 1). We then scale everything by 1/$self->_zoom since 
+#        # $self->_camera_target is expressed in terms of model units.
+#        -($pos->x - $size->x/2) * ($zoom) / $self->_zoom,
+#        -($pos->y - $size->y/2) * ($zoom) / $self->_zoom,
+#        0,
+#    ) if 0;
+
     $self->on_viewport_changed->() if $self->on_viewport_changed;
     $self->Resize($self->GetSizeWH) if $self->IsShownOnScreen;
     $self->Refresh;
@@ -669,9 +688,82 @@ sub select_view {
 
 sub get_zoom_to_bounding_box_factor {
     my ($self, $bb) = @_;
-    return undef if ($bb->empty);
-    my $max_size = max(@{$bb->size}) * 2;
-    return ($max_size == 0) ? undef : min($self->GetSizeWH) / $max_size;
+    my $max_bb_size = max(@{ $bb->size });
+    return undef if ($max_bb_size == 0);
+        
+    # project the bbox vertices on a plane perpendicular to the camera forward axis
+    # then calculates the vertices coordinate on this plane along the camera xy axes
+    
+    # we need the view matrix, we let opengl calculate it (same as done in render sub)
+    glMatrixMode(GL_MODELVIEW);
+    glLoadIdentity();
+
+    if (!TURNTABLE_MODE) {
+        # Shift the perspective camera.
+        my $camera_pos = Slic3r::Pointf3->new(0,0,-$self->_camera_distance);
+        glTranslatef(@$camera_pos);
+    }
+    
+    if (TURNTABLE_MODE) {
+        # Turntable mode is enabled by default.
+        glRotatef(-$self->_stheta, 1, 0, 0); # pitch
+        glRotatef($self->_sphi, 0, 0, 1);    # yaw
+    } else {
+        # Shift the perspective camera.
+        my $camera_pos = Slic3r::Pointf3->new(0,0,-$self->_camera_distance);
+        glTranslatef(@$camera_pos);
+        my @rotmat = quat_to_rotmatrix($self->quat);
+        glMultMatrixd_p(@rotmat[0..15]);
+    }    
+    glTranslatef(@{ $self->_camera_target->negative });
+    
+    # get the view matrix back from opengl
+    my @matrix = glGetFloatv_p(GL_MODELVIEW_MATRIX);
+
+    # camera axes
+    my $right = Slic3r::Pointf3->new($matrix[0], $matrix[4], $matrix[8]);
+    my $up = Slic3r::Pointf3->new($matrix[1], $matrix[5], $matrix[9]);
+    my $forward = Slic3r::Pointf3->new($matrix[2], $matrix[6], $matrix[10]);
+    
+    my $bb_min = $bb->min_point();
+    my $bb_max = $bb->max_point();
+    my $bb_center = $bb->center();
+    
+    # bbox vertices in world space
+    my @vertices = ();    
+    push(@vertices, $bb_min);
+    push(@vertices, Slic3r::Pointf3->new($bb_max->x(), $bb_min->y(), $bb_min->z()));
+    push(@vertices, Slic3r::Pointf3->new($bb_max->x(), $bb_max->y(), $bb_min->z()));
+    push(@vertices, Slic3r::Pointf3->new($bb_min->x(), $bb_max->y(), $bb_min->z()));
+    push(@vertices, Slic3r::Pointf3->new($bb_min->x(), $bb_min->y(), $bb_max->z()));
+    push(@vertices, Slic3r::Pointf3->new($bb_max->x(), $bb_min->y(), $bb_max->z()));
+    push(@vertices, $bb_max);
+    push(@vertices, Slic3r::Pointf3->new($bb_min->x(), $bb_max->y(), $bb_max->z()));
+    
+    my $max_x = 0.0;
+    my $max_y = 0.0;
+
+    # margin factor to give some empty space around the bbox
+    my $margin_factor = 1.25;
+    
+    foreach my $v (@vertices) {
+        # project vertex on the plane perpendicular to camera forward axis
+        my $pos = Slic3r::Pointf3->new($v->x() - $bb_center->x(), $v->y() - $bb_center->y(), $v->z() - $bb_center->z());
+        my $proj_on_normal = $pos->x() * $forward->x() + $pos->y() * $forward->y() + $pos->z() * $forward->z();
+        my $proj_on_plane = Slic3r::Pointf3->new($pos->x() - $proj_on_normal * $forward->x(), $pos->y() - $proj_on_normal * $forward->y(), $pos->z() - $proj_on_normal * $forward->z());
+        
+        # calculates vertex coordinate along camera xy axes
+        my $x_on_plane = $proj_on_plane->x() * $right->x() + $proj_on_plane->y() * $right->y() + $proj_on_plane->z() * $right->z();
+        my $y_on_plane = $proj_on_plane->x() * $up->x() + $proj_on_plane->y() * $up->y() + $proj_on_plane->z() * $up->z();
+    
+        $max_x = max($max_x, $margin_factor * 2 * abs($x_on_plane));
+        $max_y = max($max_y, $margin_factor * 2 * abs($y_on_plane));
+    }
+    
+    my ($cw, $ch) = $self->GetSizeWH;
+    my $min_ratio = min($cw / $max_x, $ch / $max_y);
+
+    return $min_ratio;
 }
 
 sub zoom_to_bounding_box {
@@ -683,6 +775,8 @@ sub zoom_to_bounding_box {
         # center view around bounding box center
         $self->_camera_target($bb->center);
         $self->on_viewport_changed->() if $self->on_viewport_changed;
+        $self->Resize($self->GetSizeWH) if $self->IsShownOnScreen;
+        $self->Refresh;
     }
 }
 
@@ -704,14 +798,18 @@ sub zoom_to_volume {
 
 sub zoom_to_volumes {
     my ($self) = @_;
+    $self->_apply_zoom_to_volumes_filter(1);
     $self->zoom_to_bounding_box($self->volumes_bounding_box);
+    $self->_apply_zoom_to_volumes_filter(0);
 }
 
 sub volumes_bounding_box {
     my ($self) = @_;
     
     my $bb = Slic3r::Geometry::BoundingBoxf3->new;
-    $bb->merge($_->transformed_bounding_box) for @{$self->volumes};
+    foreach my $v (@{$self->volumes}) {
+        $bb->merge($v->transformed_bounding_box) if (! $self->_apply_zoom_to_volumes_filter || $v->zoom_to_volumes);
+    }
     return $bb;
 }
 
@@ -942,6 +1040,9 @@ sub mulquats {
 sub mouse_to_3d {
     my ($self, $x, $y, $z) = @_;
 
+    return unless $self->GetContext;
+    $self->SetCurrent($self->GetContext);
+
     my @viewport    = glGetIntegerv_p(GL_VIEWPORT);             # 4 items
     my @mview       = glGetDoublev_p(GL_MODELVIEW_MATRIX);      # 16 items
     my @proj        = glGetDoublev_p(GL_PROJECTION_MATRIX);     # 16 items
@@ -1010,8 +1111,8 @@ sub Resize {
         #FIXME setting the size of the box 10x larger than necessary
         # is only a workaround for an incorrectly set camera.
         # This workaround harms Z-buffer accuracy!
-#        my $depth = 1.05 * $self->max_bounding_box->radius(); 
-       my $depth = 10.0 * $self->max_bounding_box->radius();
+#        my $depth = 1.05 * $self->max_bounding_box->radius();
+       my $depth = max(@{ $self->max_bounding_box->size });
         glOrtho(
             -$x/2, $x/2, -$y/2, $y/2,
             -$depth, $depth,
@@ -1141,7 +1242,7 @@ sub Render {
     glMatrixMode(GL_MODELVIEW);
     glLoadIdentity();
 
-    {
+    if (!TURNTABLE_MODE) {
         # Shift the perspective camera.
         my $camera_pos = Slic3r::Pointf3->new(0,0,-$self->_camera_distance);
         glTranslatef(@$camera_pos);
@@ -1165,19 +1266,18 @@ sub Render {
     # Head light
     glLightfv_p(GL_LIGHT1, GL_POSITION, 1, 0, 1, 0);
     
-    if ($self->enable_picking) {
-        # Render the object for picking.
-        # FIXME This cannot possibly work in a multi-sampled context as the color gets mangled by the anti-aliasing.
-        # Better to use software ray-casting on a bounding-box hierarchy.
-        glPushAttrib(GL_ENABLE_BIT);
-        glDisable(GL_MULTISAMPLE) if ($self->{can_multisample});
-        glDisable(GL_LIGHTING);
-        glDisable(GL_BLEND);
-        $self->draw_volumes(1);
-        glFlush();
-        glFinish();
-        
+    if ($self->enable_picking && !$self->_mouse_dragging) {
         if (my $pos = $self->_mouse_pos) {
+            # Render the object for picking.
+            # FIXME This cannot possibly work in a multi-sampled context as the color gets mangled by the anti-aliasing.
+            # Better to use software ray-casting on a bounding-box hierarchy.
+            glPushAttrib(GL_ENABLE_BIT);
+            glDisable(GL_MULTISAMPLE) if ($self->{can_multisample});
+            glDisable(GL_LIGHTING);
+            glDisable(GL_BLEND);
+            $self->draw_volumes(1);
+            glPopAttrib();
+            glFlush();
             my $col = [ glReadPixels_p($pos->x, $self->GetSize->GetHeight - $pos->y, 1, 1, GL_RGBA, GL_UNSIGNED_BYTE) ];
             my $volume_idx = $col->[0] + $col->[1]*256 + $col->[2]*256*256;
             $self->_hover_volume_idx(undef);
@@ -1193,11 +1293,8 @@ sub Render {
                 
                 $self->on_hover->($volume_idx) if $self->on_hover;
             }
+            glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
         }
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-        glFlush();
-        glFinish();
-        glPopAttrib();
     }
     
     # draw fixed background
@@ -1268,10 +1365,7 @@ sub Render {
         # disable depth testing so that axes are not covered by ground
         glDisable(GL_DEPTH_TEST);
         my $origin = $self->origin;
-        my $axis_len = max(
-            0.3 * max(@{ $self->bed_bounding_box->size }),
-              2 * max(@{ $volumes_bb->size }),
-        );
+        my $axis_len = $self->use_plain_shader ? 0.3 * max(@{ $self->bed_bounding_box->size }) : 2 * max(@{ $volumes_bb->size });
         glLineWidth(2);
         glBegin(GL_LINES);
         # draw line for x axis
@@ -1294,20 +1388,31 @@ sub Render {
     }
     
     glEnable(GL_LIGHTING);
-    
+        
     # draw objects
     if (! $self->use_plain_shader) {
         $self->draw_volumes;
     } elsif ($self->UseVBOs) {
+        if ($self->enable_picking) {
+            $self->mark_volumes_for_layer_height;
+            $self->volumes->set_print_box($self->bed_bounding_box->x_min, $self->bed_bounding_box->y_min, 0.0, $self->bed_bounding_box->x_max, $self->bed_bounding_box->y_max, $self->{config}->get('max_print_height'));
+            $self->volumes->update_outside_state($self->{config}, 0);
+            # do not cull backfaces to show broken geometry, if any
+            glDisable(GL_CULL_FACE);
+        }
         $self->{plain_shader}->enable if $self->{plain_shader};
         $self->volumes->render_VBOs;
         $self->{plain_shader}->disable;
+        glEnable(GL_CULL_FACE) if ($self->enable_picking);
     } else {
+        # do not cull backfaces to show broken geometry, if any
+        glDisable(GL_CULL_FACE) if ($self->enable_picking);
         $self->volumes->render_legacy;
+        glEnable(GL_CULL_FACE) if ($self->enable_picking);
     }
 
-    # draw cutting plane
     if (defined $self->cutting_plane_z) {
+        # draw cutting plane
         my $plane_z = $self->cutting_plane_z;
         my $bb = $volumes_bb;
         glDisable(GL_CULL_FACE);
@@ -1323,22 +1428,34 @@ sub Render {
         glEnd();
         glEnable(GL_CULL_FACE);
         glDisable(GL_BLEND);
+        
+        # draw cutting contours
+        glEnableClientState(GL_VERTEX_ARRAY);
+        glLineWidth(2);
+        glColor3f(0, 0, 0);
+        glVertexPointer_c(3, GL_FLOAT, 0, $self->cut_lines_vertices->ptr());
+        glDrawArrays(GL_LINES, 0, $self->cut_lines_vertices->elements / 3);
+        glVertexPointer_c(3, GL_FLOAT, 0, 0);
+        glDisableClientState(GL_VERTEX_ARRAY);
     }
 
+    # draw warning message
+    $self->draw_warning;
+    
     # draw gcode preview legend
     $self->draw_legend;
     
     $self->draw_active_object_annotations;
     
     $self->SwapBuffers();
-
-    # Calling glFinish has a performance penalty, but it seems to fix some OpenGL driver hang-up with extremely large scenes.
-#    glFinish();
 }
 
 sub draw_volumes {
     # $fakecolor is a boolean indicating, that the objects shall be rendered in a color coding the object index for picking.
     my ($self, $fakecolor) = @_;
+    
+    # do not cull backfaces to show broken geometry, if any
+    glDisable(GL_CULL_FACE);
     
     glEnable(GL_BLEND);
     glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
@@ -1346,36 +1463,10 @@ sub draw_volumes {
     glEnableClientState(GL_VERTEX_ARRAY);
     glEnableClientState(GL_NORMAL_ARRAY);
     
-    my $z_cursor_relative = $self->_variable_layer_thickness_bar_mouse_cursor_z_relative;
     foreach my $volume_idx (0..$#{$self->volumes}) {
         my $volume = $self->volumes->[$volume_idx];
 
-        my $shader_active = 0;
-        my $object_id = int($volume->select_group_id / 1000000);
-        if ($self->layer_editing_enabled && ! $fakecolor && $volume->selected && $self->{layer_height_edit_shader} && 
-            $volume->has_layer_height_texture && $object_id < $self->{print}->object_count) {
-            # Update the height texture if the ModelObject::layer_height_texture is invalid.
-            $volume->generate_layer_height_texture($self->{print}->get_object($object_id), 0);
-            $self->{layer_height_edit_shader}->enable;
-            $self->{layer_height_edit_shader}->set_uniform('z_to_texture_row',            $volume->layer_height_texture_z_to_row_id);
-            $self->{layer_height_edit_shader}->set_uniform('z_texture_row_to_normalized', 1. / $volume->layer_height_texture_height);
-            $self->{layer_height_edit_shader}->set_uniform('z_cursor',                    $volume->bounding_box->z_max * $z_cursor_relative);
-            $self->{layer_height_edit_shader}->set_uniform('z_cursor_band_width',         $self->{layer_height_edit_band_width});
-            glBindTexture(GL_TEXTURE_2D, $self->{layer_preview_z_texture_id});
-#            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_LEVEL, 0);
-#            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAX_LEVEL, 1);
-            glTexImage2D_c(GL_TEXTURE_2D, 0, GL_RGBA8, $volume->layer_height_texture_width, $volume->layer_height_texture_height, 
-                0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-            glTexImage2D_c(GL_TEXTURE_2D, 1, GL_RGBA8, $volume->layer_height_texture_width / 2, $volume->layer_height_texture_height / 2,
-                0, GL_RGBA, GL_UNSIGNED_BYTE, 0);
-#                glPixelStorei(GL_UNPACK_ALIGNMENT, 1);
-#                glPixelStorei(GL_UNPACK_ROW_LENGTH, $self->{layer_preview_z_texture_width});
-            glTexSubImage2D_c(GL_TEXTURE_2D, 0, 0, 0, $volume->layer_height_texture_width, $volume->layer_height_texture_height,
-                GL_RGBA, GL_UNSIGNED_BYTE, $volume->layer_height_texture_data_ptr_level0);
-            glTexSubImage2D_c(GL_TEXTURE_2D, 1, 0, 0, $volume->layer_height_texture_width / 2, $volume->layer_height_texture_height / 2,
-                GL_RGBA, GL_UNSIGNED_BYTE, $volume->layer_height_texture_data_ptr_level1);
-            $shader_active = 1;
-        } elsif ($fakecolor) {
+        if ($fakecolor) {
             # Object picking mode. Render the object with a color encoding the object index.
             my $r = ($volume_idx & 0x000000FF) >>  0;
             my $g = ($volume_idx & 0x0000FF00) >>  8;
@@ -1390,23 +1481,28 @@ sub draw_volumes {
         }
 
         $volume->render;
-
-        if ($shader_active) {
-            glBindTexture(GL_TEXTURE_2D, 0);
-            $self->{layer_height_edit_shader}->disable;
-        }
     }
     glDisableClientState(GL_NORMAL_ARRAY);
-    glDisable(GL_BLEND);
-    
-    if (defined $self->cutting_plane_z) {
-        glLineWidth(2);
-        glColor3f(0, 0, 0);
-        glVertexPointer_c(3, GL_FLOAT, 0, $self->cut_lines_vertices->ptr());
-        glDrawArrays(GL_LINES, 0, $self->cut_lines_vertices->elements / 3);
-        glVertexPointer_c(3, GL_FLOAT, 0, 0);
-    }
     glDisableClientState(GL_VERTEX_ARRAY);
+    
+    glDisable(GL_BLEND);
+    glEnable(GL_CULL_FACE);    
+}
+
+sub mark_volumes_for_layer_height {
+    my ($self) = @_;
+    
+    foreach my $volume_idx (0..$#{$self->volumes}) {
+        my $volume = $self->volumes->[$volume_idx];
+        my $object_id = int($volume->select_group_id / 1000000);
+        if ($self->layer_editing_enabled && $volume->selected && $self->{layer_height_edit_shader} && 
+            $volume->has_layer_height_texture && $object_id < $self->{print}->object_count) {
+            $volume->set_layer_height_texture_data($self->{layer_preview_z_texture_id}, $self->{layer_height_edit_shader}->shader_program_id,
+                $self->{print}->get_object($object_id), $self->_variable_layer_thickness_bar_mouse_cursor_z_relative, $self->{layer_height_edit_band_width});
+        } else {
+            $volume->reset_layer_height_texture_data();
+        }
+    }
 }
 
 sub _load_image_set_texture {
@@ -1513,10 +1609,13 @@ sub draw_active_object_annotations {
     my ($reset_left, $reset_bottom, $reset_right, $reset_top) = $self->_variable_layer_thickness_reset_rect_viewport;
     my $z_cursor_relative = $self->_variable_layer_thickness_bar_mouse_cursor_z_relative;
 
+    my $print_object = $self->{print}->get_object($object_idx);
+    my $z_max = $print_object->model_object->bounding_box->z_max;
+    
     $self->{layer_height_edit_shader}->enable;
     $self->{layer_height_edit_shader}->set_uniform('z_to_texture_row',            $volume->layer_height_texture_z_to_row_id);
     $self->{layer_height_edit_shader}->set_uniform('z_texture_row_to_normalized', 1. / $volume->layer_height_texture_height);
-    $self->{layer_height_edit_shader}->set_uniform('z_cursor',                    $volume->bounding_box->z_max * $z_cursor_relative);
+    $self->{layer_height_edit_shader}->set_uniform('z_cursor',                    $z_max * $z_cursor_relative);
     $self->{layer_height_edit_shader}->set_uniform('z_cursor_band_width',         $self->{layer_height_edit_band_width});
     glBindTexture(GL_TEXTURE_2D, $self->{layer_preview_z_texture_id});
     glTexImage2D_c(GL_TEXTURE_2D, 0, GL_RGBA8, $volume->layer_height_texture_width, $volume->layer_height_texture_height, 
@@ -1538,8 +1637,8 @@ sub draw_active_object_annotations {
     glBegin(GL_QUADS);
     glVertex3f($bar_left,  $bar_bottom, 0);
     glVertex3f($bar_right, $bar_bottom, 0);
-    glVertex3f($bar_right, $bar_top, $volume->bounding_box->z_max);
-    glVertex3f($bar_left,  $bar_top, $volume->bounding_box->z_max);
+    glVertex3f($bar_right, $bar_top, $z_max);
+    glVertex3f($bar_left,  $bar_top, $z_max);
     glEnd();
     glBindTexture(GL_TEXTURE_2D, 0);
     $self->{layer_height_edit_shader}->disable;
@@ -1558,7 +1657,6 @@ sub draw_active_object_annotations {
 
     # Paint the graph.
     #FIXME show some kind of legend.
-    my $print_object = $self->{print}->get_object($object_idx);
     my $max_z = unscale($print_object->size->z);
     my $profile = $print_object->model_object->layer_height_profile;
     my $layer_height = $print_object->config->get('layer_height');
@@ -1600,33 +1698,72 @@ sub draw_active_object_annotations {
 sub draw_legend {
     my ($self) = @_;
  
-    if ($self->_legend_enabled)
-    {
-        # If the legend texture has not been loaded into the GPU, do it now.
-        my $tex_id = Slic3r::GUI::_3DScene::finalize_legend_texture;
-        if ($tex_id > 0)
-        {
-            my $tex_w = Slic3r::GUI::_3DScene::get_legend_texture_width;
-            my $tex_h = Slic3r::GUI::_3DScene::get_legend_texture_height;
-            if (($tex_w > 0) && ($tex_h > 0))
-            {
-                glDisable(GL_DEPTH_TEST);
-                glPushMatrix();
-                glLoadIdentity();
-        
-                my ($cw, $ch) = $self->GetSizeWH;
-                
-                my $l = (-0.5 * $cw) / $self->_zoom;
-                my $t = (0.5 * $ch) / $self->_zoom;
-                my $r = $l + $tex_w / $self->_zoom;
-                my $b = $t - $tex_h / $self->_zoom;
-                $self->_render_texture($tex_id, $l, $r, $b, $t);
+    if (!$self->_legend_enabled) {
+        return;
+    }
 
-                glPopMatrix();
-                glEnable(GL_DEPTH_TEST);
-            }
+    # If the legend texture has not been loaded into the GPU, do it now.
+    my $tex_id = Slic3r::GUI::_3DScene::finalize_legend_texture;
+    if ($tex_id > 0)
+    {
+        my $tex_w = Slic3r::GUI::_3DScene::get_legend_texture_width;
+        my $tex_h = Slic3r::GUI::_3DScene::get_legend_texture_height;
+        if (($tex_w > 0) && ($tex_h > 0))
+        {
+            glDisable(GL_DEPTH_TEST);
+            glPushMatrix();
+            glLoadIdentity();
+
+            my ($cw, $ch) = $self->GetSizeWH;
+
+            my $l = (-0.5 * $cw) / $self->_zoom;
+            my $t = (0.5 * $ch) / $self->_zoom;
+            my $r = $l + $tex_w / $self->_zoom;
+            my $b = $t - $tex_h / $self->_zoom;
+            $self->_render_texture($tex_id, $l, $r, $b, $t);
+
+            glPopMatrix();
+            glEnable(GL_DEPTH_TEST);
         }
     }
+}
+
+sub draw_warning {
+    my ($self) = @_;
+ 
+    if (!$self->_warning_enabled) {
+        return;
+    }
+
+    # If the warning texture has not been loaded into the GPU, do it now.
+    my $tex_id = Slic3r::GUI::_3DScene::finalize_warning_texture;
+    if ($tex_id > 0)
+    {
+        my $tex_w = Slic3r::GUI::_3DScene::get_warning_texture_width;
+        my $tex_h = Slic3r::GUI::_3DScene::get_warning_texture_height;
+        if (($tex_w > 0) && ($tex_h > 0))
+        {
+            glDisable(GL_DEPTH_TEST);
+            glPushMatrix();
+            glLoadIdentity();
+        
+            my ($cw, $ch) = $self->GetSizeWH;
+                
+            my $l = (-0.5 * $tex_w) / $self->_zoom;
+            my $t = (-0.5 * $ch + $tex_h) / $self->_zoom;
+            my $r = $l + $tex_w / $self->_zoom;
+            my $b = $t - $tex_h / $self->_zoom;
+            $self->_render_texture($tex_id, $l, $r, $b, $t);
+
+            glPopMatrix();
+            glEnable(GL_DEPTH_TEST);
+        }
+    }
+}
+
+sub update_volumes_colors_by_extruder {
+    my ($self, $config) = @_;    
+    $self->volumes->update_colors_by_extruder($config);
 }
 
 sub opengl_info
@@ -1693,57 +1830,71 @@ sub _vertex_shader_Gouraud {
     return <<'VERTEX';
 #version 110
 
-#define INTENSITY_CORRECTION 0.7
+#define INTENSITY_CORRECTION 0.6
 
-#define LIGHT_TOP_DIR        -0.6/1.31, 0.6/1.31, 1./1.31
+// normalized values for (-0.6/1.31, 0.6/1.31, 1./1.31)
+const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
 #define LIGHT_TOP_DIFFUSE    (0.8 * INTENSITY_CORRECTION)
-#define LIGHT_TOP_SPECULAR   (0.5 * INTENSITY_CORRECTION)
-#define LIGHT_TOP_SHININESS  50.
+#define LIGHT_TOP_SPECULAR   (0.125 * INTENSITY_CORRECTION)
+#define LIGHT_TOP_SHININESS  20.0
 
-#define LIGHT_FRONT_DIR      1./1.43, 0.2/1.43, 1./1.43
+// normalized values for (1./1.43, 0.2/1.43, 1./1.43)
+const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
 #define LIGHT_FRONT_DIFFUSE  (0.3 * INTENSITY_CORRECTION)
-#define LIGHT_FRONT_SPECULAR (0.0 * INTENSITY_CORRECTION)
-#define LIGHT_FRONT_SHININESS 50.
+//#define LIGHT_FRONT_SPECULAR (0.0 * INTENSITY_CORRECTION)
+//#define LIGHT_FRONT_SHININESS 5.0
 
 #define INTENSITY_AMBIENT    0.3
 
-varying float intensity_specular;
-varying float intensity_tainted;
+const vec3 ZERO = vec3(0.0, 0.0, 0.0);
+
+struct PrintBoxDetection
+{
+    vec3 min;
+    vec3 max;
+    // xyz contains the offset, if w == 1.0 detection needs to be performed
+    vec4 volume_origin;
+};
+
+uniform PrintBoxDetection print_box;
+
+// x = tainted, y = specular;
+varying vec2 intensity;
+
+varying vec3 delta_box_min;
+varying vec3 delta_box_max;
 
 void main()
 {
-    vec3 eye, normal, lightDir, viewVector, halfVector;
-    float NdotL, NdotHV;
-
-    eye = vec3(0., 0., 1.);
-
-    // First transform the normal into eye space and normalize the result.
-    normal = normalize(gl_NormalMatrix * gl_Normal);
-    
-    // Now normalize the light's direction. Note that according to the OpenGL specification, the light is stored in eye space. 
-    // Also since we're talking about a directional light, the position field is actually direction.
-    lightDir = vec3(LIGHT_TOP_DIR);
-    halfVector = normalize(lightDir + eye);
+    // First transform the normal into camera space and normalize the result.
+    vec3 normal = normalize(gl_NormalMatrix * gl_Normal);
     
     // Compute the cos of the angle between the normal and lights direction. The light is directional so the direction is constant for every vertex.
     // Since these two are normalized the cosine is the dot product. We also need to clamp the result to the [0,1] range.
-    NdotL = max(dot(normal, lightDir), 0.0);
+    float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
 
-    intensity_tainted = INTENSITY_AMBIENT + NdotL * LIGHT_TOP_DIFFUSE;
-    intensity_specular = 0.;
+    intensity.x = INTENSITY_AMBIENT + NdotL * LIGHT_TOP_DIFFUSE;
+    intensity.y = 0.0;
 
     if (NdotL > 0.0)
-        intensity_specular = LIGHT_TOP_SPECULAR * pow(max(dot(normal, halfVector), 0.0), LIGHT_TOP_SHININESS);
+        intensity.y += LIGHT_TOP_SPECULAR * pow(max(dot(normal, reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
 
-    // Perform the same lighting calculation for the 2nd light source.
-    lightDir = vec3(LIGHT_FRONT_DIR);
-//    halfVector = normalize(lightDir + eye);
-    NdotL = max(dot(normal, lightDir), 0.0);
-    intensity_tainted += NdotL * LIGHT_FRONT_DIFFUSE;
+    // Perform the same lighting calculation for the 2nd light source (no specular applied).
+    NdotL = max(dot(normal, LIGHT_FRONT_DIR), 0.0);
+    intensity.x += NdotL * LIGHT_FRONT_DIFFUSE;
 
-    // compute the specular term if NdotL is larger than zero
-//    if (NdotL > 0.0)
-//        intensity_specular += LIGHT_FRONT_SPECULAR * pow(max(dot(normal, halfVector), 0.0), LIGHT_FRONT_SHININESS);
+    // compute deltas for out of print volume detection (world coordinates)
+    if (print_box.volume_origin.w == 1.0)
+    {
+        vec3 v = gl_Vertex.xyz + print_box.volume_origin.xyz;
+        delta_box_min = v - print_box.min;
+        delta_box_max = v - print_box.max;
+    }
+    else
+    {
+        delta_box_min = ZERO;
+        delta_box_max = ZERO;
+    }    
 
     gl_Position = ftransform();
 } 
@@ -1755,16 +1906,21 @@ sub _fragment_shader_Gouraud {
     return <<'FRAGMENT';
 #version 110
 
-varying float intensity_specular;
-varying float intensity_tainted;
+const vec3 ZERO = vec3(0.0, 0.0, 0.0);
+
+// x = tainted, y = specular;
+varying vec2 intensity;
+
+varying vec3 delta_box_min;
+varying vec3 delta_box_max;
 
 uniform vec4 uniform_color;
 
 void main()
 {
-    gl_FragColor = 
-        vec4(intensity_specular, intensity_specular, intensity_specular, 0.) + uniform_color * intensity_tainted;
-    gl_FragColor.a = uniform_color.a;
+    // if the fragment is outside the print volume -> use darker color
+    vec3 color = (any(lessThan(delta_box_min, ZERO)) || any(greaterThan(delta_box_max, ZERO))) ? mix(uniform_color.rgb, ZERO, 0.3333) : uniform_color.rgb;
+    gl_FragColor = vec4(vec3(intensity.y, intensity.y, intensity.y) + color * intensity.x, uniform_color.a);
 }
 
 FRAGMENT
@@ -1829,6 +1985,7 @@ void main() {
         // compute the specular term into spec
 //        intensity_specular += LIGHT_FRONT_SPECULAR * pow(max(dot(h,normal), 0.0), LIGHT_FRONT_SHININESS);
     }
+    
     gl_FragColor = max(
         vec4(intensity_specular, intensity_specular, intensity_specular, 0.) + uniform_color * intensity_tainted, 
         INTENSITY_AMBIENT * uniform_color);
@@ -1841,61 +1998,47 @@ sub _vertex_shader_variable_layer_height {
     return <<'VERTEX';
 #version 110
 
-#define LIGHT_TOP_DIR        0., 1., 0.
-#define LIGHT_TOP_DIFFUSE    0.2
-#define LIGHT_TOP_SPECULAR   0.3
-#define LIGHT_TOP_SHININESS  50.
+#define INTENSITY_CORRECTION 0.6
 
-#define LIGHT_FRONT_DIR      0., 0., 1.
-#define LIGHT_FRONT_DIFFUSE  0.5
-#define LIGHT_FRONT_SPECULAR 0.3
-#define LIGHT_FRONT_SHININESS 50.
+const vec3 LIGHT_TOP_DIR = vec3(-0.4574957, 0.4574957, 0.7624929);
+#define LIGHT_TOP_DIFFUSE    (0.8 * INTENSITY_CORRECTION)
+#define LIGHT_TOP_SPECULAR   (0.125 * INTENSITY_CORRECTION)
+#define LIGHT_TOP_SHININESS  20.0
 
-#define INTENSITY_AMBIENT    0.1
+const vec3 LIGHT_FRONT_DIR = vec3(0.6985074, 0.1397015, 0.6985074);
+#define LIGHT_FRONT_DIFFUSE  (0.3 * INTENSITY_CORRECTION)
+//#define LIGHT_FRONT_SPECULAR (0.0 * INTENSITY_CORRECTION)
+//#define LIGHT_FRONT_SHININESS 5.0
 
-uniform float z_to_texture_row;
-varying float intensity_specular;
-varying float intensity_tainted;
+#define INTENSITY_AMBIENT    0.3
+
+// x = tainted, y = specular;
+varying vec2 intensity;
+
 varying float object_z;
 
 void main()
 {
-    vec3 eye, normal, lightDir, viewVector, halfVector;
-    float NdotL, NdotHV;
-
-//    eye = gl_ModelViewMatrixInverse[3].xyz;
-    eye = vec3(0., 0., 1.);
-
-    // First transform the normal into eye space and normalize the result.
-    normal = normalize(gl_NormalMatrix * gl_Normal);
-    
-    // Now normalize the light's direction. Note that according to the OpenGL specification, the light is stored in eye space. 
-    // Also since we're talking about a directional light, the position field is actually direction.
-    lightDir = vec3(LIGHT_TOP_DIR);
-    halfVector = normalize(lightDir + eye);
+    // First transform the normal into camera space and normalize the result.
+    vec3 normal = normalize(gl_NormalMatrix * gl_Normal);
     
     // Compute the cos of the angle between the normal and lights direction. The light is directional so the direction is constant for every vertex.
     // Since these two are normalized the cosine is the dot product. We also need to clamp the result to the [0,1] range.
-    NdotL = max(dot(normal, lightDir), 0.0);
+    float NdotL = max(dot(normal, LIGHT_TOP_DIR), 0.0);
 
-    intensity_tainted = INTENSITY_AMBIENT + NdotL * LIGHT_TOP_DIFFUSE;
-    intensity_specular = 0.;
+    intensity.x = INTENSITY_AMBIENT + NdotL * LIGHT_TOP_DIFFUSE;
+    intensity.y = 0.0;
 
-//    if (NdotL > 0.0)
-//        intensity_specular = LIGHT_TOP_SPECULAR * pow(max(dot(normal, halfVector), 0.0), LIGHT_TOP_SHININESS);
-
-    // Perform the same lighting calculation for the 2nd light source.
-    lightDir = vec3(LIGHT_FRONT_DIR);
-    halfVector = normalize(lightDir + eye);
-    NdotL = max(dot(normal, lightDir), 0.0);
-    intensity_tainted += NdotL * LIGHT_FRONT_DIFFUSE;
-    
-    // compute the specular term if NdotL is larger than zero
     if (NdotL > 0.0)
-        intensity_specular += LIGHT_FRONT_SPECULAR * pow(max(dot(normal, halfVector), 0.0), LIGHT_FRONT_SHININESS);
+        intensity.y += LIGHT_TOP_SPECULAR * pow(max(dot(normal, reflect(-LIGHT_TOP_DIR, normal)), 0.0), LIGHT_TOP_SHININESS);
 
+    // Perform the same lighting calculation for the 2nd light source (no specular)
+    NdotL = max(dot(normal, LIGHT_FRONT_DIR), 0.0);
+    
+    intensity.x += NdotL * LIGHT_FRONT_DIFFUSE;
+    
     // Scaled to widths of the Z texture.
-    object_z = gl_Vertex.z / gl_Vertex.w;
+    object_z = gl_Vertex.z;
 
     gl_Position = ftransform();
 } 
@@ -1914,12 +2057,13 @@ uniform sampler2D z_texture;
 // Scaling from the Z texture rows coordinate to the normalized texture row coordinate.
 uniform float z_to_texture_row;
 uniform float z_texture_row_to_normalized;
-
-varying float intensity_specular;
-varying float intensity_tainted;
-varying float object_z;
 uniform float z_cursor;
 uniform float z_cursor_band_width;
+
+// x = tainted, y = specular;
+varying vec2 intensity;
+
+varying float object_z;
 
 void main()
 {
@@ -1939,15 +2083,12 @@ void main()
     float lod           = clamp(0.5 * log2(max(dx_vtc*dx_vtc, dy_vtc*dy_vtc)), 0., 1.);
     // Sample the Z texture. Texture coordinates are normalized to <0, 1>.
     vec4 color       =
-        (1. - lod) * texture2D(z_texture, vec2(z_texture_col, z_texture_row_to_normalized * (z_texture_row + 0.5    )), -10000.) +
-        lod        * texture2D(z_texture, vec2(z_texture_col, z_texture_row_to_normalized * (z_texture_row * 2. + 1.)),  10000.);
+        mix(texture2D(z_texture, vec2(z_texture_col, z_texture_row_to_normalized * (z_texture_row + 0.5    )), -10000.),
+            texture2D(z_texture, vec2(z_texture_col, z_texture_row_to_normalized * (z_texture_row * 2. + 1.)),  10000.), lod);
+            
     // Mix the final color.
     gl_FragColor = 
-        vec4(intensity_specular, intensity_specular, intensity_specular, 1.) + 
-        (1. - z_blend) * intensity_tainted * color + 
-        z_blend * vec4(1., 1., 0., 0.);
-    // and reset the transparency.
-    gl_FragColor.a = 1.;
+        vec4(intensity.y, intensity.y, intensity.y, 1.0) +  intensity.x * mix(color, vec4(1.0, 1.0, 0.0, 1.0), z_blend);
 }
 
 FRAGMENT
@@ -2043,6 +2184,13 @@ sub set_toolpaths_range {
 
 sub reset_legend_texture {
     Slic3r::GUI::_3DScene::reset_legend_texture();
+}
+
+sub get_current_print_zs {
+    my ($self) = @_;
+    
+    my $count = $self->volumes->get_current_print_zs();
+    return $count;
 }
 
 1;

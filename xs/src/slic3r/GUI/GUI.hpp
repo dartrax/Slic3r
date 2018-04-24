@@ -6,6 +6,7 @@
 #include "Config.hpp"
 
 class wxApp;
+class wxWindow;
 class wxFrame;
 class wxWindow;
 class wxMenuBar;
@@ -14,6 +15,11 @@ class wxComboCtrl;
 class wxString;
 class wxArrayString;
 class wxArrayLong;
+class wxColour;
+class wxBoxSizer;
+class wxFlexGridSizer;
+class wxButton;
+class wxFileDialog;
 
 namespace Slic3r { 
 
@@ -23,14 +29,24 @@ class AppConfig;
 class DynamicPrintConfig;
 class TabIface;
 
-//! macro used to localization, return wxString
-#define _L(s) wxGetTranslation(s)
-//! macro used to localization, return const CharType *
-#define _LU8(s) wxGetTranslation(s).ToUTF8().data()
+// !!! If you needed to translate some wxString,
+// !!! please use _(L(string))
+// !!! _() - is a standard wxWidgets macro to translate
+// !!! L() is used only for marking localizable string 
+// !!! It will be used in "xgettext" to create a Locating Message Catalog.
+#define L(s) s
+
+//! macro used to localization, return wxScopedCharBuffer
+//! With wxConvUTF8 explicitly specify that the source string is already in UTF-8 encoding
+#define _CHB(s) wxGetTranslation(wxString(s, wxConvUTF8)).utf8_str()
+
+// Minimal buffer length for translated string (char buf[MIN_BUF_LENGTH_FOR_L])
+#define MIN_BUF_LENGTH_FOR_L	512
 
 namespace GUI {
 
 class Tab;
+class ConfigOptionsGroup;
 // Map from an file_type name to full file wildcard name.
 typedef std::map<std::string, std::string> t_file_wild_card;
 inline t_file_wild_card& get_file_wild_card() {
@@ -39,8 +55,9 @@ inline t_file_wild_card& get_file_wild_card() {
 		FILE_WILDCARDS["known"] = "Known files (*.stl, *.obj, *.amf, *.xml, *.prusa)|*.stl;*.STL;*.obj;*.OBJ;*.amf;*.AMF;*.xml;*.XML;*.prusa;*.PRUSA";
 		FILE_WILDCARDS["stl"] = "STL files (*.stl)|*.stl;*.STL";
 		FILE_WILDCARDS["obj"] = "OBJ files (*.obj)|*.obj;*.OBJ";
-		FILE_WILDCARDS["amf"] = "AMF files (*.amf)|*.amf;*.AMF;*.xml;*.XML";
-		FILE_WILDCARDS["prusa"] = "Prusa Control files (*.prusa)|*.prusa;*.PRUSA";
+        FILE_WILDCARDS["amf"] = "AMF files (*.amf)|*.zip.amf;*.amf;*.AMF;*.xml;*.XML";
+        FILE_WILDCARDS["3mf"] = "3MF files (*.3mf)|*.3mf;*.3MF;";
+        FILE_WILDCARDS["prusa"] = "Prusa Control files (*.prusa)|*.prusa;*.PRUSA";
 		FILE_WILDCARDS["ini"] = "INI files *.ini|*.ini;*.INI";
 		FILE_WILDCARDS["gcode"] = "G-code files (*.gcode, *.gco, *.g, *.ngc)|*.gcode;*.GCODE;*.gco;*.GCO;*.g;*.G;*.ngc;*.NGC";
 		FILE_WILDCARDS["svg"] = "SVG files *.svg|*.svg;*.SVG";
@@ -58,22 +75,33 @@ void break_to_debugger();
 void set_wxapp(wxApp *app);
 void set_main_frame(wxFrame *main_frame);
 void set_tab_panel(wxNotebook *tab_panel);
+void set_app_config(AppConfig *app_config);
+void set_preset_bundle(PresetBundle *preset_bundle);
+
+AppConfig*	get_app_config();
+wxApp*		get_app();
+
+const wxColour& get_modified_label_clr();
+const wxColour& get_sys_label_clr();
+unsigned get_colour_approx_luma(const wxColour &colour);
 
 void add_debug_menu(wxMenuBar *menu, int event_language_change);
+
+// Create "Preferences" dialog after selecting menu "Preferences" in Perl part
+void open_preferences_dialog(int event_preferences);
+
 // Create a new preset tab (print, filament and printer),
-void create_preset_tabs(PresetBundle *preset_bundle, AppConfig *app_config, 
-						bool no_controller, bool is_disabled_button_browse,	bool is_user_agent,
-						int event_value_change, int event_presets_changed,
-						int event_button_browse, int event_button_test);
+void create_preset_tabs(bool no_controller, int event_value_change, int event_presets_changed);
 TabIface* get_preset_tab_iface(char *name);
 
 // add it at the end of the tab panel.
-void add_created_tab(Tab* panel, PresetBundle *preset_bundle, AppConfig *app_config);
+void add_created_tab(Tab* panel);
 // Change option value in config
-void change_opt_value(DynamicPrintConfig& config, t_config_option_key opt_key, boost::any value, int opt_index = 0);
+void change_opt_value(DynamicPrintConfig& config, const t_config_option_key& opt_key, const boost::any& value, int opt_index = 0);
 
-void show_error(wxWindow* parent, wxString message);
-void show_info(wxWindow* parent, wxString message, wxString title);
+void show_error(wxWindow* parent, const wxString& message);
+void show_info(wxWindow* parent, const wxString& message, const wxString& title);
+void warning_catcher(wxWindow* parent, const wxString& message);
 
 // load language saved at application config 
 bool load_language();
@@ -97,6 +125,19 @@ void create_combochecklist(wxComboCtrl* comboCtrl, std::string text, std::string
 // encoded inside an int.
 int combochecklist_get_flags(wxComboCtrl* comboCtrl);
 
+// Return translated std::string as a wxString
+wxString	L_str(const std::string &str);
+// Return wxString from std::string in UTF8
+wxString	from_u8(const std::string &str);
+
+
+void add_frequently_changed_parameters(wxWindow* parent, wxBoxSizer* sizer, wxFlexGridSizer* preset_sizer);
+
+ConfigOptionsGroup* get_optgroup();
+wxButton*			get_wiping_dialog_button();
+
+void add_export_option(wxFileDialog* dlg, const std::string& format);
+int get_export_option(wxFileDialog* dlg);
 }
 }
 

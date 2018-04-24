@@ -102,8 +102,12 @@ public:
 
     // Returns the bounding box of the transformed instances.
     // This bounding box is approximate and not snug.
-    BoundingBoxf3 bounding_box();
+    // This bounding box is being cached.
+    const BoundingBoxf3& bounding_box();
     void invalidate_bounding_box() { m_bounding_box_valid = false; }
+    // Returns a snug bounding box of the transformed instances.
+    // This bounding box is not being cached.
+    BoundingBoxf3 tight_bounding_box(bool include_modifiers) const;
 
     // A mesh containing all transformed instances of this object.
     TriangleMesh mesh() const;
@@ -226,6 +230,8 @@ private:
 // all objects may share mutliple materials.
 class Model
 {
+    static unsigned int s_auto_extruder_id;
+
 public:
     // Materials are owned by a model and referenced by objects through t_model_material_id.
     // Single material may be shared by multiple models.
@@ -260,7 +266,10 @@ public:
     void delete_material(t_model_material_id material_id);
     void clear_materials();
     bool add_default_instances();
-    BoundingBoxf3 bounding_box();
+    // Returns approximate axis aligned bounding box of this model
+    BoundingBoxf3 bounding_box() const;
+    // Returns tight axis aligned bounding box of this model
+    BoundingBoxf3 transformed_bounding_box() const;
     void center_instances_around_point(const Pointf &point);
     void translate(coordf_t x, coordf_t y, coordf_t z) { for (ModelObject *o : this->objects) o->translate(x, y, z); }
     TriangleMesh mesh() const;
@@ -273,7 +282,18 @@ public:
     bool looks_like_multipart_object() const;
     void convert_multipart_object();
 
+    // Ensures that the min z of the model is not negative
+    void adjust_min_z();
+
+    // Returs true if this model is contained into the print volume defined inside the given config
+    bool fits_print_volume(const DynamicPrintConfig* config) const;
+    bool fits_print_volume(const FullPrintConfig &config) const;
+
     void print_info() const { for (const ModelObject *o : this->objects) o->print_info(); }
+
+    static unsigned int get_auto_extruder_id();
+    static std::string get_auto_extruder_id_as_string();
+    static void reset_auto_extruder_id();
 };
 
 }
